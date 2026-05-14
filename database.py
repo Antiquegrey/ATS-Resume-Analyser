@@ -1,14 +1,16 @@
+# database.py — make sure it looks exactly like this
+
 from sqlalchemy import create_engine, Column, Integer, String, DateTime
-from sqlalchemy.orm import declarative_base
-from sqlalchemy.orm import sessionmaker
+from sqlalchemy.orm import declarative_base, sessionmaker
 from datetime import datetime
+import os
+from dotenv import load_dotenv
+load_dotenv()
 
-DATABASE_URL = "postgresql://vijay@localhost/ats_analyzer"
-
+DATABASE_URL = os.getenv("DATABASE_URL")
 engine = create_engine(DATABASE_URL)
-SessionLocal = sessionmaker(bind=engine)
+SessionLocal = sessionmaker(bind=engine, autocommit=False, autoflush=False)
 Base = declarative_base()
-
 
 class Analysis(Base):
     __tablename__ = "analyses"
@@ -21,5 +23,5 @@ class Analysis(Base):
     improvements = Column(String)
     created_at = Column(DateTime, default=datetime.utcnow)
 
-
-    Base.metadata.create_all(engine)
+# ← this must be OUTSIDE the class
+Base.metadata.create_all(engine)

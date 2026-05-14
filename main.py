@@ -1,42 +1,80 @@
-from fastapi import FastAPI
+# main.py
+
+from fastapi import FastAPI, Depends
 from pydantic import BaseModel
 from groq import Groq
-import json
+from sqlalchemy.orm import Session
 from dotenv import load_dotenv
+from database import SessionLocal, Analysis
+import os
+import json
 
-app=FastAPI()
+load_dotenv()
 
-@app.get("/")
-def home():
-    return {"message": "welcome to ats analyser"}
+app = FastAPI()
 
-
+client = Groq(api_key=os.getenv("GROQ_API_KEY"))
 
 class ResumeInput(BaseModel):
     resume_text: str
     job_description: str
 
+def get_db():
+    db = SessionLocal()
+    try:
+        yield db
+    finally:
+        db.close()
 
-import os
-
-load_dotenv()
-client = os.getenv("GROQ_API_KEY")
+@app.get("/")
+def home():
+    return {"message": "welcome to ats analyser"}
 
 @app.post("/analyse")
-def analyse(data: ResumeInput):
+def analyse(data: ResumeInput, db: Session = Depends(get_db)):
     response = client.chat.completions.create(
-        model="llama-3.3-70b-versatile",
-        messages=[{
+    model="llama-3.3-70b-versatile",
+    messages=[
+        {
+            "role": "system",
+            "content": "You are an ATS resume analyzer. You ONLY respond with valid raw JSON. No markdown, no explanation, no code blocks."
+        },
+        {
             "role": "user",
             "content": f"""
-            You are an ATS resume analyzer.
             Resume: {data.resume_text}
             Job Description: {data.job_description}
-            Give me:
-            1. ATS match score out of 100
-            2. Top 3 missing keywords
-            3. Top 3 specific improvements
+
+            Return exactly this JSON structure:
+            {{
+                "ats_score": <number out of 100>,
+                "missing_keywords": ["keyword1", "keyword2", "keyword3"],
+                "improvements": ["improvement1", "improvement2", "improvement3"]
+            }}
             """
-        }]
-    )
-    return {"analysis": response.choices[0].message.content}
+        }
+    ]
+)
+        
+       
+    
+    result_text = response.choices[0].message.content
+    print("RAW RESPONSE:", repr(result_text))  # add this line
+    clean_text = result_text.strip().removeprefix("```json").removeprefix("```").removesuffix("```").strip()
+    parsed = json.loads(clean_text)
+    record = Analysis(
+        resume_text=data.resume_text,
+        job_description=data.job_description,
+        ats_score=parsed["ats_score"],
+        missing_keywords=str(parsed["missing_keywords"]),
+        improvements=str(parsed["improvements"])
+    )   
+    db.add(record)
+    db.commit()
+    db.refresh(record)
+
+    return {"id": record.id, "analysis": result_text}
+
+@app.get("/analyses")
+def get_all(db: Session = Depends(get_db)):
+    return db.query(Analysis).all()
