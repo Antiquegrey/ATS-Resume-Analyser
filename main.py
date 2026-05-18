@@ -1,24 +1,18 @@
 # main.py
-
-from fastapi import FastAPI, Depends
+from fastapi import FastAPI, UploadFile, File, Form, Depends, HTTPException
 from pydantic import BaseModel
-from groq import Groq
 from sqlalchemy.orm import Session
 from dotenv import load_dotenv
 from database import SessionLocal, Analysis
+from services.analyser import analyze_resume
+from services.parser import extract_text
 import os
-import json
 
 load_dotenv()
 
 app = FastAPI()
 
-client = Groq(api_key=os.getenv("GROQ_API_KEY"))
-
-class ResumeInput(BaseModel):
-    resume_text: str
-    job_description: str
-
+# --- DB dependency ---
 def get_db():
     db = SessionLocal()
     try:
@@ -26,55 +20,86 @@ def get_db():
     finally:
         db.close()
 
+# --- Routes ---
+
 @app.get("/")
 def home():
-    return {"message": "welcome to ats analyser"}
+    return {"message": "Welcome to ATS Analyser"}
 
-@app.post("/analyse")
-def analyse(data: ResumeInput, db: Session = Depends(get_db)):
-    response = client.chat.completions.create(
-    model="llama-3.3-70b-versatile",
-    messages=[
-        {
-            "role": "system",
-            "content": "You are an ATS resume analyzer. You ONLY respond with valid raw JSON. No markdown, no explanation, no code blocks."
-        },
-        {
-            "role": "user",
-            "content": f"""
-            Resume: {data.resume_text}
-            Job Description: {data.job_description}
 
-            Return exactly this JSON structure:
-            {{
-                "ats_score": <number out of 100>,
-                "missing_keywords": ["keyword1", "keyword2", "keyword3"],
-                "improvements": ["improvement1", "improvement2", "improvement3"]
-            }}
-            """
-        }
+@app.post("/resume/upload")
+async def upload_and_analyse(
+    file: UploadFile = File(...),
+    job_description: str = Form(...),  # job description sent alongside file
+    db: Session = Depends(get_db)
+):
+    """
+    Accepts a real PDF/DOCX file + job description.
+    Extracts text → runs analysis (with caching) → saves to DB.
+    """
+    # Validate file type
+    allowed = [
+        "application/pdf",
+        "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+        "application/msword"
     ]
-)
-        
-       
-    
-    result_text = response.choices[0].message.content
-    print("RAW RESPONSE:", repr(result_text))  # add this line
-    clean_text = result_text.strip().removeprefix("```json").removeprefix("```").removesuffix("```").strip()
-    parsed = json.loads(clean_text)
+    if file.content_type not in allowed:
+        raise HTTPException(status_code=400, detail="Only PDF or DOCX files allowed")
+
+    # Read file bytes and extract text
+    file_bytes = await file.read()
+    resume_text = extract_text(file_bytes, file.content_type)
+
+    # Analyze — uses cache if same resume+job was seen before
+    result = analyze_resume(resume_text, job_description)
+
+    # Save to DB
     record = Analysis(
-        resume_text=data.resume_text,
-        job_description=data.job_description,
-        ats_score=parsed["ats_score"],
-        missing_keywords=str(parsed["missing_keywords"]),
-        improvements=str(parsed["improvements"])
-    )   
+        resume_text=resume_text,
+        job_description=job_description,
+        ats_score=result["ats_score"],
+        missing_keywords=str(result["missing_keywords"]),
+        improvements=str(result["improvements"])
+    )
     db.add(record)
     db.commit()
     db.refresh(record)
 
-    return {"id": record.id, "analysis": result_text}
+    return {
+        "id": record.id,
+        "analysis": result
+    }
+
+
+@app.post("/analyse")
+def analyse_text(
+    resume_text: str = Form(...),
+    job_description: str = Form(...),
+    db: Session = Depends(get_db)
+):
+    """
+    Kept for testing — accepts raw text instead of file.
+    Useful for Postman/Swagger testing without needing a real PDF.
+    """
+    result = analyze_resume(resume_text, job_description)
+
+    record = Analysis(
+        resume_text=resume_text,
+        job_description=job_description,
+        ats_score=result["ats_score"],
+        missing_keywords=str(result["missing_keywords"]),
+        improvements=str(result["improvements"])
+    )
+    db.add(record)
+    db.commit()
+    db.refresh(record)
+
+    return {
+        "id": record.id,
+        "analysis": result
+    }
+
 
 @app.get("/analyses")
 def get_all(db: Session = Depends(get_db)):
-    return db.query(Analysis).all()
+    return db.query(Analysis).all() 
